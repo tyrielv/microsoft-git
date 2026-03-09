@@ -2720,20 +2720,24 @@ static int deleted_entry(const struct cache_entry *ce,
 		if (verify_absent(ce, ERROR_WOULD_LOSE_UNTRACKED_REMOVED, o))
 			return -1;
 		return 0;
-	} else {
+	} else if (core_virtualfilesystem &&
+		   old->ce_flags & CE_NEW_SKIP_WORKTREE) {
 		/*
 		 * When core_virtualfilesystem is set, 'ce' may be a tree
 		 * entry from traverse_trees() that lacks CE_NEW_SKIP_WORKTREE
 		 * (only src_index entries get that flag from
 		 * mark_new_skip_worktree()). Propagate it from the index
-		 * entry so verify_absent_if_directory()'s fast-path works,
-		 * avoiding unnecessary lstats on virtualized paths.
+		 * entry so that the working directory is not touched for
+		 * paths managed by the virtual filesystem.
+		 *
+		 * We skip verify_absent_if_directory() entirely because
+		 * skip_sparse_checkout is never set when
+		 * core_virtualfilesystem is active, so it would always
+		 * short-circuit.
 		 */
-		if (core_virtualfilesystem &&
-		    old->ce_flags & CE_NEW_SKIP_WORKTREE)
-			((struct cache_entry *)ce)->ce_flags |= CE_NEW_SKIP_WORKTREE;
-		if (verify_absent_if_directory(ce, ERROR_WOULD_LOSE_UNTRACKED_REMOVED, o))
-			return -1;
+		((struct cache_entry *)ce)->ce_flags |= CE_NEW_SKIP_WORKTREE;
+	} else if (verify_absent_if_directory(ce, ERROR_WOULD_LOSE_UNTRACKED_REMOVED, o)) {
+		return -1;
 	}
 
 	if (!(old->ce_flags & CE_CONFLICTED) && verify_uptodate(old, o))
