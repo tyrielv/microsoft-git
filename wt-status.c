@@ -10,6 +10,7 @@
 #include "diff.h"
 #include "environment.h"
 #include "gettext.h"
+#include "gvfs.h"
 #include "hash.h"
 #include "hex.h"
 #include "object-name.h"
@@ -1615,7 +1616,7 @@ static void show_sparse_checkout_in_use(struct wt_status *s,
 {
 	if (s->state.sparse_checkout_percentage == SPARSE_CHECKOUT_DISABLED)
 		return;
-	if (core_virtualfilesystem)
+	if (gvfs_config_is_set(s->repo, GVFS_USE_VIRTUAL_FILESYSTEM))
 		return;
 
 	if (s->state.sparse_checkout_percentage == SPARSE_CHECKOUT_SPARSE_INDEX)

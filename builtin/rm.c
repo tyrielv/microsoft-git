@@ -14,6 +14,7 @@
 #include "lockfile.h"
 #include "dir.h"
 #include "gettext.h"
+#include "gvfs.h"
 #include "hash.h"
 #include "tree-walk.h"
 #include "object-name.h"
@@ -270,6 +271,7 @@ int cmd_rm(int argc,
 {
 	struct lock_file lock_file = LOCK_INIT;
 	int i, ret = 0;
+	int use_vfs;
 	struct pathspec pathspec;
 	char *seen;
 
@@ -306,6 +308,8 @@ int cmd_rm(int argc,
 	if (repo_read_index(the_repository) < 0)
 		die(_("index file corrupt"));
 
+	use_vfs = gvfs_config_is_set(the_repository, GVFS_USE_VIRTUAL_FILESYSTEM);
+
 	refresh_index(the_repository->index, REFRESH_QUIET|REFRESH_UNMERGED, &pathspec, NULL, NULL);
 
 	seen = xcalloc(pathspec.nr, 1);
@@ -317,7 +321,7 @@ int cmd_rm(int argc,
 	for (unsigned int i = 0; i < the_repository->index->cache_nr; i++) {
 		const struct cache_entry *ce = the_repository->index->cache[i];
 
-		if (!include_sparse && !core_virtualfilesystem &&
+		if (!include_sparse && !use_vfs &&
 		    (ce_skip_worktree(ce) ||
 		     !path_in_sparse_checkout(ce->name, the_repository->index)))
 			continue;
@@ -358,7 +362,7 @@ int cmd_rm(int argc,
 		 * When using a virtual filesystem, we might re-add a path
 		 * that is currently virtual and we want that to succeed.
 		 */
-		if (!core_virtualfilesystem && only_match_skip_worktree.nr) {
+		if (!use_vfs && only_match_skip_worktree.nr) {
 			advise_on_updating_sparse_paths(&only_match_skip_worktree);
 			ret = 1;
 		}

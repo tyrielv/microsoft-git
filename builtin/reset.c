@@ -15,6 +15,7 @@
 #include "config.h"
 #include "environment.h"
 #include "gettext.h"
+#include "gvfs.h"
 #include "hash.h"
 #include "hex.h"
 #include "lockfile.h"
@@ -159,6 +160,7 @@ static void update_index_from_diff(struct diff_queue_struct *q,
 {
 	int i;
 	int intent_to_add = *(int *)data;
+	int use_vfs = gvfs_config_is_set(the_repository, GVFS_USE_VIRTUAL_FILESYSTEM);
 
 	for (i = 0; i < q->nr; i++) {
 		int pos;
@@ -183,7 +185,7 @@ static void update_index_from_diff(struct diff_queue_struct *q,
 		 * directory so that they will have the right content and the next
 		 * status call will show modified or untracked files correctly.
 		 */
-		if (core_virtualfilesystem && !file_exists(two->path))
+		if (use_vfs && !file_exists(two->path))
 		{
 			respect_skip_worktree = 0;
 			pos = index_name_pos(the_repository->index, two->path, strlen(two->path));

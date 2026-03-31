@@ -15,6 +15,7 @@
 #include "editor.h"
 #include "dir.h"
 #include "gettext.h"
+#include "gvfs.h"
 #include "pathspec.h"
 #include "run-command.h"
 #include "object-file.h"
@@ -53,7 +54,7 @@ static int chmod_pathspec(struct repository *repo,
 		int err;
 
 		if (!include_sparse &&
-		    !core_virtualfilesystem &&
+		    !gvfs_config_is_set(repo, GVFS_USE_VIRTUAL_FILESYSTEM) &&
 		    (ce_skip_worktree(ce) ||
 		     !path_in_sparse_checkout(ce->name, repo->index)))
 			continue;
@@ -127,6 +128,7 @@ static int refresh(struct repository *repo, int verbose, const struct pathspec *
 {
 	char *seen;
 	int i, ret = 0;
+	int use_vfs = gvfs_config_is_set(repo, GVFS_USE_VIRTUAL_FILESYSTEM);
 	char *skip_worktree_seen = NULL;
 	struct string_list only_match_skip_worktree = STRING_LIST_INIT_NODUP;
 	unsigned int flags = REFRESH_IGNORE_SKIP_WORKTREE |
@@ -139,7 +141,7 @@ static int refresh(struct repository *repo, int verbose, const struct pathspec *
 		if (!seen[i]) {
 			const char *path = pathspec->items[i].original;
 
-			if (!core_virtualfilesystem &&
+			if (!use_vfs &&
 			    (matches_skip_worktree(pathspec, i, &skip_worktree_seen) ||
 			     !path_in_sparse_checkout(path, repo->index))) {
 				string_list_append(&only_match_skip_worktree,
@@ -155,7 +157,7 @@ static int refresh(struct repository *repo, int verbose, const struct pathspec *
 	 * When using a virtual filesystem, we might re-add a path
 	 * that is currently virtual and we want that to succeed.
 	 */
-	if (!core_virtualfilesystem && only_match_skip_worktree.nr) {
+	if (!use_vfs && only_match_skip_worktree.nr) {
 		advise_on_updating_sparse_paths(&only_match_skip_worktree);
 		ret = 1;
 	}
@@ -558,7 +560,7 @@ int cmd_add(int argc,
 			 * When using a virtual filesystem, we might re-add a path
 			 * that is currently virtual and we want that to succeed.
 			 */
-			if (!include_sparse && !core_virtualfilesystem &&
+			if (!include_sparse && !gvfs_config_is_set(repo, GVFS_USE_VIRTUAL_FILESYSTEM) &&
 			    matches_skip_worktree(&pathspec, i, &skip_worktree_seen)) {
 				string_list_append(&only_match_skip_worktree,
 						   pathspec.items[i].original);
