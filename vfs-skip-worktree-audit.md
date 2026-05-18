@@ -254,3 +254,98 @@ Properly guards: `if (!ignore_skip_worktree && ce_skip_worktree(ce)) return 0;`
 - **diff-lib merged entries**: Edge case, low probability in practice.
 - **apply.c / update-index.c**: Plumbing commands, rarely hit in VFS
   workflows.
+
+---
+
+## Investigation Results (May 2026)
+
+Detailed analysis of each finding, tested against a GVFS-mounted repo
+(ForTests) with ProjFS.  Placeholder creation tracked via the
+`VFSForGit.sqlite` Placeholder table; entries measured before/after
+operations following `gvfs dehydrate`.
+
+### Category 2 (Filesystem Operations) — Reassessed
+
+#### 2.1 verify_uptodate_1() — CONFIRMED, low practical impact
+
+The lstat fires during `git reset --mixed` (the default reset mode).
+The code path: `oneway_merge()` → `merged_entry()` → `verify_uptodate()`
+→ `verify_uptodate_1()` → lstat.  This triggers because:
+
+- Mixed reset sets `o->update = 0`
+- `skip_sparse_checkout` becomes 1 (line 1961: `!o->update`)
+- `mark_new_skip_worktree()` does not run
+- `verify_uptodate()` wrapper requires BOTH `CE_SKIP_WORKTREE` and
+  `CE_NEW_SKIP_WORKTREE` for the fast-path — without the latter, it
+  falls through to `verify_uptodate_1()`
+- In `verify_uptodate_1()`, skip-worktree entries explicitly bypass the
+  `o->reset` fast-path (line 2274: "CE_SKIP_WORKTREE cheat")
+
+**Repro (ForTests)**: Created a commit modifying a virtual file, then
+dehydrated.  `git reset HEAD~1` created 2 new ProjFS directory
+placeholders (from 4 → 6) for the path leading to the modified file.
+
+**Practical impact is low** because `git reset --mixed` checks the OLD
+index entry (current HEAD) against the working tree.  The files being
+checked are ones that differ between current HEAD and target — typically
+files the user recently committed, which already have placeholders from
+the user's editing workflow.  New placeholder creation only occurs after
+dehydration or for files the user never directly accessed (e.g. after
+rebase).
+
+**Fix**: Add `core_virtualfilesystem && ce_skip_worktree(ce)` guard in
+`verify_uptodate_1()` after the `index_only` check.  Defense-in-depth.
+Branch: `tyrielv/vfs-skip-worktree-verify-uptodate`.
+
+#### 2.2 verify_absent_1() — ALREADY PROTECTED
+
+PR #865 propagates `CE_NEW_SKIP_WORKTREE` from index entries to tree
+entries in `merged_entry_override()`, and `verify_absent_if_directory()`
+skips entries with `CE_NEW_SKIP_WORKTREE`.  The common checkout/merge
+paths are protected.
+
+#### 2.3 checkout_entry_ca() — ALREADY FIXED
+
+PR #915 prevents callers from reaching `checkout_entry_ca()` for
+skip-worktree entries.  No remaining gap.
+
+#### 2.4 unlink_entry() — PROTECTED BY GVFS FLAG
+
+`apply_sparse_checkout()` line 593 checks
+`GVFS_NO_DELETE_OUTSIDE_SPARSECHECKOUT` (bit 3 of `core.gvfs`).  When
+set, `CE_WT_REMOVE` is NOT added for entries transitioning to
+skip-worktree.  Since VFS repos have this flag in `core.gvfs`,
+`unlink_entry()` is never called for virtual files.
+
+Line 578-579 also clears `CE_WT_REMOVE` for entries that were AND remain
+skip-worktree, providing a second layer of protection.
+
+#### 2.5 diff-lib check_removed() — MINIMAL IMPACT
+
+`check_removed()` lstats unmerged (stage > 0) entries without a
+skip-worktree guard.  However, unmerged entries in a VFS repo have
+already been materialized by merge-ort's
+`record_conflicted_index_entries()` (line 4712-4713), so the lstat finds
+a real file and is cheap.
+
+### Category 1 (CE_SKIP_WORKTREE Cleared) — Reassessed
+
+#### 1.1 merge-ort create_ce_flags(0) — NOT A REAL ISSUE
+
+The `create_ce_flags(0)` at line 2057 only applies to `.gitattributes`
+entries in a **temporary attr_index** used for reading merge attributes.
+It does NOT affect the main merge result index.
+
+merge-ort's `checkout()` function uses `twoway_merge` with `update=1`,
+which triggers `mark_new_skip_worktree()` and properly preserves
+skip-worktree for clean results.  Conflicted entries are intentionally
+materialized (line 4712-4713) so the user can resolve them.
+
+#### 1.2 stash apply — CORRECTLY SCOPED
+
+`unstage_changes_unless_new()` diffs `orig_tree` (pre-merge state)
+against the post-merge index, so it only processes files that the stash
+actually modified.  The `ce->ce_flags &= ~CE_SKIP_WORKTREE` at line 559
+and the lstat at line 539 are correctly limited to stash-changed files.
+Materializing these files is the intended behavior — the user stashed
+them and wants them restored to the working tree.
