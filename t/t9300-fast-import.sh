@@ -2601,6 +2601,61 @@ test_expect_success !MINGW 'R: print new blob by sha1' '
 	test_cmp expect actual
 '
 
+test_expect_success 'R: opt-in allows missing objects in M commands' '
+	missing_blob=$(
+		printf "missing fast-import blob %s\n" "$$" |
+		git hash-object --stdin
+	) &&
+	test_must_fail git cat-file -e "$missing_blob" &&
+	cat >missing-object.input <<-EOF &&
+	commit refs/heads/missing-object
+	committer $GIT_COMMITTER_NAME <$GIT_COMMITTER_EMAIL> 0 +0000
+	data 0
+
+	M 100644 $missing_blob missing
+
+	done
+	EOF
+
+	test_must_fail env GIT_NO_LAZY_FETCH=1 \
+		git fast-import --done <missing-object.input &&
+
+	GIT_NO_LAZY_FETCH=1 GIT_ALLOW_FASTIMPORT_MISSING_OBJECTS=1 \
+		git fast-import --done <missing-object.input &&
+	printf "100644 blob %s\tmissing\n" "$missing_blob" >expect &&
+	git ls-tree refs/heads/missing-object >actual &&
+	test_cmp expect actual &&
+	GIT_NO_LAZY_FETCH=1 \
+		git rev-list --objects --all --missing=print >missing &&
+	grep "^?$missing_blob\$" missing &&
+	test_must_fail git cat-file -e "$missing_blob" &&
+
+	git update-ref -d refs/heads/missing-object &&
+	GIT_NO_LAZY_FETCH=1 \
+		git fast-import --done --allow-missing-objects \
+		<missing-object.input &&
+	git ls-tree refs/heads/missing-object >actual &&
+	test_cmp expect actual &&
+	test_must_fail git cat-file -e "$missing_blob"
+'
+
+test_expect_success 'R: missing-object opt-in preserves type checks' '
+	wrong_type=$(git mktree </dev/null) &&
+	cat >wrong-type.input <<-EOF &&
+	commit refs/heads/missing-wrong-type
+	committer $GIT_COMMITTER_NAME <$GIT_COMMITTER_EMAIL> 0 +0000
+	data 0
+
+	M 100644 $wrong_type wrong
+
+	done
+	EOF
+
+	test_must_fail env GIT_ALLOW_FASTIMPORT_MISSING_OBJECTS=1 \
+		git fast-import --done <wrong-type.input 2>err &&
+	grep "not a blob (actually a tree)" err
+'
+
 test_expect_success 'setup: big file' '
 	(
 		echo "the quick brown fox jumps over the lazy dog" >big &&

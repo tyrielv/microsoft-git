@@ -169,6 +169,7 @@ static unsigned long max_depth = 50;
 static off_t max_packsize;
 static int unpack_limit = 100;
 static int force_update;
+static int allow_missing_objects;
 
 /* Stats and misc. counters */
 static uintmax_t alloc_count;
@@ -2443,11 +2444,11 @@ static void file_change_m(const char *p, struct branch *b)
 		enum object_type type = oe ? oe->type :
 					odb_read_object_info(the_repository->objects,
 							     &oid, NULL);
-		if (type < 0)
+		if (type < 0 && !allow_missing_objects)
 			die(_("%s not found: %s"),
 			    S_ISDIR(mode) ?  _("tree") : _("blob"),
 			    command_buf.buf);
-		if (type != expected)
+		if (type >= 0 && type != expected)
 			die(_("not a %s (actually a %s): %s"),
 				type_name(expected), type_name(type),
 				command_buf.buf);
@@ -3774,6 +3775,8 @@ static int parse_one_option(const char *option)
 		quiet = 1;
 	} else if (!strcmp(option, "stats")) {
 		show_stats = 1;
+	} else if (!strcmp(option, "allow-missing-objects")) {
+		allow_missing_objects = 1;
 	} else if (!strcmp(option, "allow-unsafe-features")) {
 		; /* already handled during early option parsing */
 	} else {
@@ -3882,7 +3885,9 @@ static void git_pack_config(void)
 }
 
 static const char fast_import_usage[] =
-"git fast-import [--date-format=<f>] [--max-pack-size=<n>] [--big-file-threshold=<n>] [--depth=<n>] [--active-branches=<n>] [--export-marks=<marks.file>]";
+"git fast-import [--date-format=<f>] [--max-pack-size=<n>] "
+"[--big-file-threshold=<n>] [--depth=<n>] [--active-branches=<n>] "
+"[--export-marks=<marks.file>] [--allow-missing-objects]";
 
 static void parse_argv(void)
 {
@@ -3930,6 +3935,8 @@ int cmd_fast_import(int argc,
 
 	reset_pack_idx_option(&pack_idx_opts);
 	git_pack_config();
+	allow_missing_objects = git_env_bool(
+		"GIT_ALLOW_FASTIMPORT_MISSING_OBJECTS", 0);
 
 	alloc_objects(object_entry_alloc);
 	strbuf_init(&command_buf, 0);
