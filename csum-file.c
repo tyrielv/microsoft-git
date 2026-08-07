@@ -33,6 +33,11 @@ static void flush(struct hashfile *f, const void *buf, unsigned int count)
 	if (0 <= f->check_fd && count)
 		verify_buffer_or_die(f, buf, count);
 
+	if (f->max_bytes > 0 &&
+	    (f->total > f->max_bytes ||
+	     count > f->max_bytes - f->total))
+		die("%s (%"PRId64")", f->max_bytes_error, f->max_bytes);
+
 	if (write_in_full(f->fd, buf, count) < 0) {
 		if (errno == ENOSPC)
 			die("sha1 file '%s' write error. Out of diskspace", f->name);
@@ -170,6 +175,8 @@ struct hashfile *hashfd_ext(const struct git_hash_algo *algop,
 	f->check_fd = -1;
 	f->offset = 0;
 	f->total = 0;
+	f->max_bytes = opts->max_bytes;
+	f->max_bytes_error = opts->max_bytes_error;
 	f->tp = opts->progress;
 	f->name = name;
 	f->do_crc = 0;

@@ -75,6 +75,7 @@ static int pack_objects(struct repository *r,
 	int rc;
 	int negative_ref_check = 0;
 	int check_missing;
+	unsigned long max_pack_size = 0;
 
 	trace2_region_enter("send_pack", "pack_objects", r);
 	strvec_push(&po.args, "pack-objects");
@@ -95,6 +96,10 @@ static int pack_objects(struct repository *r,
 		strvec_push(&po.args, "--no-use-bitmap-index");
 	if (args->no_reuse_delta)
 		strvec_push(&po.args, "--no-reuse-delta");
+	repo_config_get_ulong(r, "transfer.maxPackSize", &max_pack_size);
+	if (max_pack_size)
+		strvec_pushf(&po.args, "--max-transfer-pack-size=%lu",
+			     max_pack_size);
 	po.in = -1;
 	po.out = args->stateless_rpc ? -1 : fd;
 	po.git_cmd = 1;

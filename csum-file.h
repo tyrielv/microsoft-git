@@ -13,6 +13,8 @@ struct hashfile {
 	unsigned int offset;
 	struct git_hash_ctx ctx;
 	off_t total;
+	int64_t max_bytes;
+	const char *max_bytes_error;
 	struct progress *tp;
 	const char *name;
 	int do_crc;
@@ -54,6 +56,13 @@ struct hashfd_options {
 
 	/* The length of the buffer that shall be used to read data. */
 	size_t buffer_len;
+
+	/*
+	 * If positive, die with max_bytes_error before writing more than this
+	 * many bytes.
+	 */
+	int64_t max_bytes;
+	const char *max_bytes_error;
 };
 
 struct hashfile *hashfd_ext(const struct git_hash_algo *algop,

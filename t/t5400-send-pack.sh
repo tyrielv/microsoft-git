@@ -308,4 +308,25 @@ test_expect_success PERL_TEST_HELPERS 'receive-pack de-dupes .have lines' '
 	test_cmp expect refs
 '
 
+test_expect_success 'transfer.maxPackSize aborts an oversized push' '
+	git init max-pack-src &&
+	git init --bare max-pack-dst.git &&
+	test-tool genrandom max-pack-size 200000 >max-pack-src/large &&
+	git -C max-pack-src add large &&
+	git -C max-pack-src commit -m large &&
+
+	test_must_fail git -C max-pack-src \
+		-c transfer.maxPackSize=1k \
+		push ../max-pack-dst.git HEAD:refs/heads/limited 2>err &&
+	grep "pack size exceeds transfer.maxPackSize (1024)" err &&
+	test_must_fail git -C max-pack-dst.git \
+		rev-parse --verify refs/heads/limited &&
+
+	git -C max-pack-src push \
+		../max-pack-dst.git HEAD:refs/heads/limited &&
+	git -C max-pack-dst.git rev-parse --verify refs/heads/limited &&
+
+	git -C max-pack-src -c transfer.maxPackSize=1k repack -ad
+'
+
 test_done

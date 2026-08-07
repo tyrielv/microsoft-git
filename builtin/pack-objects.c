@@ -226,6 +226,9 @@ static const char *base_name;
 static int progress = 1;
 static int window = 10;
 static unsigned long pack_size_limit;
+static unsigned long max_transfer_pack_size;
+static const char max_transfer_pack_size_error[] =
+	"pack size exceeds transfer.maxPackSize";
 static int depth = 50;
 static int delta_search_threads;
 static int pack_to_stdout;
@@ -1355,6 +1358,9 @@ static void write_pack_file(void)
 			struct hashfd_options opts = {
 				.progress = progress_state,
 				.buffer_len = LARGE_PACKET_DATA_MAX - 1,
+				.max_bytes = max_transfer_pack_size,
+				.max_bytes_error =
+					max_transfer_pack_size_error,
 			};
 			f = hashfd_ext(the_repository->hash_algo, 1,
 				       "<stdout>", &opts);
@@ -5045,6 +5051,9 @@ int cmd_pack_objects(int argc,
 		  PARSE_OPT_NONEG, option_parse_index_version),
 		OPT_UNSIGNED(0, "max-pack-size", &pack_size_limit,
 			     N_("maximum size of each output pack file")),
+		OPT_UNSIGNED(0, "max-transfer-pack-size",
+			     &max_transfer_pack_size,
+			     N_("maximum size of a streamed pack")),
 		OPT_BOOL(0, "local", &local,
 			 N_("ignore borrowed objects from alternate object store")),
 		OPT_BOOL(0, "incremental", &incremental,
