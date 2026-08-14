@@ -2441,14 +2441,20 @@ static void file_change_m(const char *p, struct branch *b)
 	} else {
 		enum object_type expected = S_ISDIR(mode) ?
 						OBJ_TREE: OBJ_BLOB;
-		enum object_type type = oe ? oe->type :
-					odb_read_object_info(the_repository->objects,
-							     &oid, NULL);
-		if (type < 0 && !allow_missing_objects)
+		enum object_type type;
+
+		if (oe)
+			type = oe->type;
+		else if (allow_missing_objects)
+			type = expected;
+		else
+			type = odb_read_object_info(the_repository->objects,
+						    &oid, NULL);
+		if (type < 0)
 			die(_("%s not found: %s"),
 			    S_ISDIR(mode) ?  _("tree") : _("blob"),
 			    command_buf.buf);
-		if (type >= 0 && type != expected)
+		if (type != expected)
 			die(_("not a %s (actually a %s): %s"),
 				type_name(expected), type_name(type),
 				command_buf.buf);

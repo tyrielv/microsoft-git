@@ -2639,7 +2639,7 @@ test_expect_success 'R: opt-in allows missing objects in M commands' '
 	test_must_fail git cat-file -e "$missing_blob"
 '
 
-test_expect_success 'R: missing-object opt-in preserves type checks' '
+test_expect_success 'R: missing-object opt-in trusts bare object IDs' '
 	wrong_type=$(git mktree </dev/null) &&
 	cat >wrong-type.input <<-EOF &&
 	commit refs/heads/missing-wrong-type
@@ -2651,9 +2651,41 @@ test_expect_success 'R: missing-object opt-in preserves type checks' '
 	done
 	EOF
 
-	test_must_fail env GIT_ALLOW_FASTIMPORT_MISSING_OBJECTS=1 \
+	test_must_fail \
 		git fast-import --done <wrong-type.input 2>err &&
-	grep "not a blob (actually a tree)" err
+	grep "not a blob (actually a tree)" err &&
+	GIT_ALLOW_FASTIMPORT_MISSING_OBJECTS=1 \
+		git fast-import --done <wrong-type.input
+'
+
+test_expect_success 'R: missing objects produce identical commits' '
+	test_when_finished "rm -rf missing-odb present-odb" &&
+	git init missing-odb &&
+	git init present-odb &&
+	printf "identical fast-import blob\n" >blob-data &&
+	blob=$(git hash-object blob-data) &&
+	git -C present-odb hash-object -w ../blob-data >actual-blob &&
+	echo "$blob" >expect-blob &&
+	test_cmp expect-blob actual-blob &&
+	cat >identical.input <<-EOF &&
+	commit refs/heads/identical
+	committer $GIT_COMMITTER_NAME <$GIT_COMMITTER_EMAIL> 0 +0000
+	data 9
+	identical
+	M 100644 $blob file
+
+	done
+	EOF
+
+	GIT_ALLOW_FASTIMPORT_MISSING_OBJECTS=1 \
+		git -C missing-odb fast-import --done <identical.input &&
+	GIT_ALLOW_FASTIMPORT_MISSING_OBJECTS=1 \
+		git -C present-odb fast-import --done <identical.input &&
+	git -C missing-odb rev-parse refs/heads/identical >missing-commit &&
+	git -C present-odb rev-parse refs/heads/identical >present-commit &&
+	test_cmp missing-commit present-commit &&
+	test_must_fail git -C missing-odb cat-file -e "$blob" &&
+	git -C present-odb cat-file -e "$blob"
 '
 
 test_expect_success 'setup: big file' '
