@@ -5,7 +5,12 @@ test_description='index.rejectExpansion makes sparse-index expansion fatal
 Verify the diagnostic config option index.rejectExpansion. When enabled, an
 attempt to expand a collapsed sparse index to a full index becomes a fatal
 error that carries the expansion reason, instead of silently expanding. The
-option is default off, and it has no effect when the index is already full.'
+option is default off, and it has no effect when the index is already full.
+
+The option fires on any expansion, including a transient one. A command that
+names an out-of-cone path expands to resolve it, then re-collapses the index
+before writing, so the on-disk index stays sparse. The option cannot tell a
+transient expansion from a persistent one, so it dies on both.'
 
 GIT_TEST_SPLIT_INDEX=0
 GIT_TEST_SPARSE_INDEX=
@@ -52,6 +57,18 @@ test_expect_success 'expansion is allowed and happens by default' '
 	GIT_TRACE2_EVENT="$(pwd)/trace2.txt" \
 		git -C sparse-repo reset -- folder1/a &&
 	test_region index ensure_full_index trace2.txt
+'
+
+# Naming an out-of-cone path expands the index transiently, but the command
+# re-collapses it before writing, so the on-disk index stays sparse. This is
+# the healthy transient case that index.rejectExpansion still dies on.
+test_expect_success 'a transient path-lookup expansion re-collapses on disk' '
+	rm -f trace2.txt &&
+	GIT_TRACE2_EVENT="$(pwd)/trace2.txt" \
+		git -C sparse-repo reset -- folder1/a &&
+	test_region index ensure_full_index trace2.txt &&
+	git -C sparse-repo ls-files --sparse >files &&
+	grep "^folder1/$" files
 '
 
 test_expect_success 'index.rejectExpansion turns expansion into a fatal error' '
