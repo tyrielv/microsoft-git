@@ -10,6 +10,7 @@
 #include "run-command.h"
 #include "name-hash.h"
 #include "read-cache-ll.h"
+#include "object.h"
 #include "virtualfilesystem.h"
 
 #define HOOK_INTERFACE_VERSION	(1)
@@ -265,6 +266,25 @@ static void clear_ce_flags_virtualfilesystem_1(struct index_state *istate, int s
 {
 	char *buf, *entry;
 	size_t i;
+	/*
+	 * When the index is a collapsed sparse index, use non-expanding,
+	 * case-sensitive lookups. index_name_pos() (via EXPAND_SPARSE) and the
+	 * name-hash helpers index_file_exists(), adjust_dirname_case() and
+	 * index_file_next_match() all call expand_to_path(), which would expand
+	 * the whole index the first time a virtual-filesystem path resolves
+	 * inside a sparse directory. That expansion, run on every index read
+	 * through apply_virtualfilesystem(), defeats the sparse index.
+	 *
+	 * index_name_pos_sparse() uses NO_EXPAND_SPARSE and never expands.
+	 * Virtual-filesystem paths that are in-cone exist as regular cache
+	 * entries and are found without expansion. Paths that fall inside a
+	 * collapsed (out-of-cone) sparse directory are represented only by that
+	 * sparse-directory entry, which legitimately keeps its CE_SKIP_WORKTREE
+	 * bit, so they are correctly left alone. On Windows this trades the
+	 * name-hash's case-insensitive match for a case-sensitive one, which is
+	 * safe here because projected tracked paths carry their committed case.
+	 */
+	int sparse = istate->sparse_index != INDEX_EXPANDED;
 
 	if (!virtual_filesystem_data.len)
 		get_virtual_filesystem_data(istate->repo, &virtual_filesystem_data);
@@ -283,14 +303,29 @@ static void clear_ce_flags_virtualfilesystem_1(struct index_state *istate, int s
 			/* look for a directory wild card (ie "dir1/") */
 			if (buf[i - 1] == '/') {
 				stats->nr_vfs_dirs++;
-				if (ignore_case)
+				if (!sparse && ignore_case)
 					adjust_dirname_case(istate, entry);
-				pos = index_name_pos(istate, entry, len);
+				if (sparse)
+					pos = index_name_pos_sparse(istate, entry, len);
+				else
+					pos = index_name_pos(istate, entry, len);
 				if (pos < 0) {
 					for (pos = -pos - 1; (size_t)pos < istate->cache_nr; pos++) {
 						ce = istate->cache[pos];
 						if (fspathncmp(ce->name, entry, len))
 							break;
+
+						/*
+						 * A sparse-directory entry nested
+						 * under this virtual-filesystem
+						 * directory represents an
+						 * out-of-cone subtree and must keep
+						 * its CE_SKIP_WORKTREE bit. (On a
+						 * full index there are no such
+						 * entries, so this is a no-op.)
+						 */
+						if (S_ISSPARSEDIR(ce->ce_mode))
+							continue;
 
 						if (select_mask && !(ce->ce_flags & select_mask))
 							continue;
@@ -301,10 +336,12 @@ static void clear_ce_flags_virtualfilesystem_1(struct index_state *istate, int s
 					}
 				}
 			} else {
-				if (ignore_case) {
+				if (!sparse && ignore_case) {
 					ce = index_file_exists(istate, entry, len, ignore_case);
 				} else {
-					int pos = index_name_pos(istate, entry, len);
+					int pos = sparse ?
+						index_name_pos_sparse(istate, entry, len) :
+						index_name_pos(istate, entry, len);
 
 					ce = NULL;
 					if (pos >= 0)
@@ -323,7 +360,7 @@ static void clear_ce_flags_virtualfilesystem_1(struct index_state *istate, int s
 						 * There may be aliases with different cases of the same
 						 * name that also need to be modified.
 						 */
-						if (ignore_case)
+						if (!sparse && ignore_case)
 							ce = index_file_next_match(istate, ce, ignore_case);
 						else
 							break;
