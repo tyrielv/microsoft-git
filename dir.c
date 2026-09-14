@@ -4169,7 +4169,7 @@ static void connect_wt_gitdir_in_nested(const char *sub_worktree,
 		die(_("index file corrupt in repo %s"), subrepo.gitdir);
 
 	/* TODO: audit for interaction with sparse-index. */
-	ensure_full_index(subrepo.index);
+	ensure_full_index_unaudited(subrepo.index);
 	for (i = 0; i < subrepo.index->cache_nr; i++) {
 		const struct cache_entry *ce = subrepo.index->cache[i];
 

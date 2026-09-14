@@ -25,6 +25,15 @@ index.sparse::
 	has no effect unless `core.sparseCheckout` and
 	`core.sparseCheckoutCone` are both enabled. Defaults to 'false'.
 
+index.rejectExpansion::
+	When enabled, Git dies instead of expanding a collapsed sparse
+	index to a full index. The fatal error carries the reason string
+	that Git would otherwise only trace, which makes every remaining
+	sparse-index expansion site easy to find and triage. This is a
+	development and diagnostic instrument; leave it disabled for normal
+	use. It has no effect when the index is already full. Defaults to
+	'false'.
+
 index.threads::
 	Specifies the number of threads to spawn when loading the index.
 	This is meant to reduce index load time on multiprocessor machines.

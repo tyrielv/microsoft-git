@@ -79,6 +79,8 @@ void prepare_repo_settings(struct repository *r)
 	repo_cfg_bool(r, "pack.usepathwalk", &r->settings.pack_use_path_walk, 0);
 	repo_cfg_bool(r, "core.multipackindex", &r->settings.core_multi_pack_index, 1);
 	repo_cfg_bool(r, "index.sparse", &r->settings.sparse_index, 1);
+	repo_cfg_bool(r, "index.rejectexpansion",
+		      &r->settings.sparse_index_reject_expansion, 0);
 	repo_cfg_bool(r, "index.skiphash", &r->settings.index_skip_hash, r->settings.index_skip_hash);
 	repo_cfg_bool(r, "pack.readreverseindex", &r->settings.pack_read_reverse_index, 1);
 	repo_cfg_bool(r, "pack.usebitmapboundarytraversal",
