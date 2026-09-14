@@ -1534,12 +1534,23 @@ enum pattern_match_result path_matches_pattern_list(
 	int result = NOT_MATCHED;
 	size_t slash_pos;
 
-	if (core_virtualfilesystem) {
+	if (core_virtualfilesystem &&
+	    !(pl && pl->use_cone_patterns && is_sparse_index_allowed(istate, 0))) {
 		/*
 		* The virtual file system data is used to prevent git from traversing
 		* any part of the tree that is not in the virtual file system.  Return
 		* 1 to exclude the entry if it is not found in the virtual file system,
 		* else fall through to the regular excludes logic as it may further exclude.
+		*
+		* This virtual-filesystem gate is skipped only for the cone-mode
+		* sparse-checkout pattern list when the sparse index feature is
+		* active (cone-mode sparse-checkout with index.sparse). Cone
+		* membership must then be evaluated purely from the cone patterns so
+		* that out-of-cone directories can collapse into sparse-directory
+		* entries. The virtual filesystem and the cone are composed: the
+		* virtual filesystem limits traversal, the cone limits the index. All
+		* other pattern lists, and repositories without the feature, keep the
+		* original virtual-filesystem behavior.
 		*/
 		if (*dtype == DT_UNKNOWN)
 			*dtype = resolve_dtype(DT_UNKNOWN, istate, pathname, pathlen);
@@ -1641,8 +1652,14 @@ static int path_in_sparse_checkout_1(const char *path,
 	/*
 	 * When using a virtual filesystem, there aren't really patterns
 	 * to follow, but be extra careful to skip this check.
+	 *
+	 * The exception is when the sparse index feature is active (cone-mode
+	 * sparse-checkout with index.sparse). A virtual-filesystem repository
+	 * then still needs real cone-membership answers so that out-of-cone
+	 * directories can collapse into sparse-directory entries. Fall through
+	 * to the cone evaluation below in that case.
 	 */
-	if (core_virtualfilesystem)
+	if (core_virtualfilesystem && !is_sparse_index_allowed(istate, 0))
 		return 1;
 
 	/*
