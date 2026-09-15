@@ -491,6 +491,25 @@ void ensure_full_index_with_reason(struct index_state *istate,
 	strbuf_vaddf(&why, fmt, ap);
 	trace2_data_string("sparse-index", istate->repo, "expansion-reason", why.buf);
 	va_end(ap);
+
+	/*
+	 * When index.rejectExpansion is set, treat a would-be expansion of a
+	 * collapsed sparse index as a fatal error instead of silently
+	 * expanding. This is a development instrument used to find and triage
+	 * every remaining expansion site; it is default off and only fires
+	 * here, after the INDEX_EXPANDED early return above, so it never
+	 * triggers on an already-full index.
+	 */
+	if (istate->repo) {
+		prepare_repo_settings(istate->repo);
+		if (istate->repo->settings.sparse_index_reject_expansion) {
+			char *reason = strbuf_detach(&why, NULL);
+			die(_("refusing to expand a sparse index "
+			      "(index.rejectExpansion is enabled): %s"),
+			    reason);
+		}
+	}
+
 	strbuf_release(&why);
 	ensure_full_index(istate);
 }

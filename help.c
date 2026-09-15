@@ -820,6 +820,16 @@ void get_version_info(struct strbuf *buf, int show_build_options)
 
 		if (fsmonitor_ipc__is_supported())
 			strbuf_addstr(buf, "feature: fsmonitor--daemon\n");
+		/*
+		 * Advertises that this build carries the sparse-index support
+		 * for a core.virtualFilesystem repository (a sparse-aware
+		 * apply_virtualfilesystem() and cone-membership evaluation under
+		 * a virtual filesystem). The code is always compiled in and is
+		 * gated at runtime by config, so the line is unconditional: its
+		 * presence means the build can support the feature. GVFS probes
+		 * for it to refuse the feature on a git that lacks the changes.
+		 */
+		strbuf_addstr(buf, "feature: vfs-sparse-index\n");
 #if !defined NO_GETTEXT
 		strbuf_addstr(buf, "gettext: enabled\n");
 #endif

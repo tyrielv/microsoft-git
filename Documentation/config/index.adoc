@@ -25,6 +25,26 @@ index.sparse::
 	has no effect unless `core.sparseCheckout` and
 	`core.sparseCheckoutCone` are both enabled. Defaults to 'false'.
 
+index.rejectExpansion::
+	When enabled, Git dies instead of expanding a collapsed sparse
+	index to a full index. The fatal error carries the reason string
+	that Git would otherwise only trace, which makes every remaining
+	sparse-index expansion site easy to find and triage. This is a
+	development and diagnostic instrument; leave it disabled for normal
+	use. It has no effect when the index is already full. Defaults to
+	'false'.
++
+This option fires on _any_ expansion, including a transient one. Several
+commands expand only to resolve a named out-of-cone path, then re-collapse
+the index before writing it, so the on-disk index stays sparse. Naming an
+out-of-cone path in `git checkout <tree-ish> -- <path>`, `git reset`, or
+`git stash push` is the usual trigger. Such an expansion is normal and
+healthy. This option cannot tell it apart from an expansion that persists,
+because the re-collapse happens later, so it dies on both. Read a death
+under this option as "an expansion site was reached", not as "the index was
+left full". To learn whether an expansion persisted, inspect the written
+index with `git ls-files --sparse` after the command instead.
+
 index.threads::
 	Specifies the number of threads to spawn when loading the index.
 	This is meant to reduce index load time on multiprocessor machines.

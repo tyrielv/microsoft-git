@@ -33,6 +33,7 @@ struct repo_settings {
 	int fetch_write_commit_graph;
 	int command_requires_full_index;
 	int sparse_index;
+	int sparse_index_reject_expansion;
 	int pack_read_reverse_index;
 	int pack_use_bitmap_boundary_traversal;
 	int pack_use_multi_pack_reuse;
