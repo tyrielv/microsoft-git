@@ -34,6 +34,7 @@
 #include "strbuf.h"
 #include "submodule-config.h"
 #include "symlinks.h"
+#include "tree-walk.h"
 #include "trace2.h"
 #include "tree.h"
 #include "hex.h"
@@ -1001,9 +1002,58 @@ static int read_skip_worktree_file_from_index(struct index_state *istate,
 	int pos, len;
 
 	len = strlen(path);
-	pos = index_name_pos(istate, path, len);
-	if (pos < 0)
-		return -1;
+
+	/*
+	 * Use the non-expanding lookup. This function is called for every
+	 * directory whose .gitignore could not be opened from the working
+	 * tree, so an expanding lookup here costs one full index expansion
+	 * per command -- and a second one, because write_locked_index() then
+	 * re-expands to restore the state it found.
+	 *
+	 * A plain sparse checkout never notices: an out-of-cone directory is
+	 * absent from the working tree, so the directory walk does not descend
+	 * into it and this lookup never happens. It dominates only when the
+	 * working tree is fully present while the index stays sparse, which is
+	 * what core.virtualFileSystem projects.
+	 */
+	pos = index_name_pos_sparse(istate, path, len);
+
+	if (pos < 0) {
+		struct cache_entry *ce;
+		struct object_id oid;
+		unsigned short mode;
+		int insert_pos = -pos - 1;
+
+		if (insert_pos <= 0)
+			return -1;
+
+		/*
+		 * Only the entry immediately before the insertion point can be
+		 * a sparse-directory ancestor of 'path'.
+		 */
+		ce = istate->cache[insert_pos - 1];
+		if (!S_ISSPARSEDIR(ce->ce_mode) ||
+		    ce_namelen(ce) >= len ||
+		    strncmp(path, ce->name, ce_namelen(ce)))
+			return -1;
+
+		/*
+		 * Read the blob out of that directory's tree. This walks a few
+		 * tree objects along the path instead of materializing every
+		 * sparse directory in the index. Everything inside a sparse
+		 * directory is outside the cone and therefore skip-worktree by
+		 * definition, so the ce_skip_worktree() check below has no
+		 * counterpart here.
+		 */
+		if (get_tree_entry(istate->repo, &ce->oid,
+				   path + ce_namelen(ce), &oid, &mode))
+			return -1;
+		if (!S_ISREG(mode))
+			return -1;
+
+		return do_read_blob(&oid, oid_stat, size_out, data_out);
+	}
+
 	if (!ce_skip_worktree(istate->cache[pos]))
 		return -1;
 
@@ -2010,9 +2060,51 @@ static enum exist_status directory_exists_in_index(struct index_state *istate,
 	if (ignore_case)
 		return directory_exists_in_index_icase(istate, dirname, len);
 
-	pos = index_name_pos(istate, dirname, len);
-	if (pos < 0)
-		pos = -pos-1;
+	/*
+	 * Use the non-expanding lookup. This runs for every directory the
+	 * working-tree walk reaches, so an expanding lookup turns the first
+	 * out-of-cone directory into a full index expansion -- and the walk
+	 * reaches out-of-cone directories whenever the working tree is fully
+	 * present while the index stays sparse, as core.virtualFileSystem
+	 * projects it.
+	 */
+	pos = index_name_pos_sparse(istate, dirname, len);
+	if (pos < 0) {
+		int insert_pos = -pos - 1;
+
+		/*
+		 * Only the entry immediately before the insertion point can be
+		 * a sparse-directory ancestor of 'dirname'. When one covers
+		 * this path, resolve the remainder in that directory's tree
+		 * rather than materializing every sparse directory.
+		 */
+		if (insert_pos > 0) {
+			const struct cache_entry *sd = istate->cache[insert_pos - 1];
+
+			if (S_ISSPARSEDIR(sd->ce_mode) &&
+			    ce_namelen(sd) < (unsigned int)len &&
+			    !strncmp(dirname, sd->name, ce_namelen(sd))) {
+				struct strbuf sub = STRBUF_INIT;
+				struct object_id oid;
+				unsigned short mode;
+				int found;
+
+				strbuf_add(&sub, dirname + ce_namelen(sd),
+					   len - ce_namelen(sd));
+				found = !get_tree_entry(istate->repo, &sd->oid,
+							sub.buf, &oid, &mode);
+				strbuf_release(&sub);
+
+				if (found && S_ISDIR(mode))
+					return index_directory;
+				if (found && S_ISGITLINK(mode))
+					return index_gitdir;
+				return index_nonexistent;
+			}
+		}
+
+		pos = insert_pos;
+	}
 	while (pos < istate->cache_nr) {
 		const struct cache_entry *ce = istate->cache[pos++];
 		unsigned char endchar;
@@ -2413,10 +2505,51 @@ static int get_index_dtype(struct index_state *istate,
 	}
 
 	/* Try to look it up as a directory */
-	pos = index_name_pos(istate, path, len);
+	pos = index_name_pos_sparse(istate, path, len);
 	if (pos >= 0)
 		return DT_UNKNOWN;
 	pos = -pos-1;
+
+	/*
+	 * A sparse-directory ancestor covers this path, so the index holds no
+	 * individual entry to scan for below. Resolve the remainder in that
+	 * directory's tree instead of expanding the whole index: this runs for
+	 * every path the working-tree walk cannot type from the name hash.
+	 */
+	if (pos > 0) {
+		const struct cache_entry *sd = istate->cache[pos - 1];
+
+		if (S_ISSPARSEDIR(sd->ce_mode) &&
+		    ce_namelen(sd) < (unsigned int)len &&
+		    !strncmp(path, sd->name, ce_namelen(sd))) {
+			struct strbuf sub = STRBUF_INIT;
+			struct object_id oid;
+			unsigned short mode;
+			int found;
+
+			strbuf_add(&sub, path + ce_namelen(sd),
+				   len - ce_namelen(sd));
+			while (sub.len && sub.buf[sub.len - 1] == '/')
+				strbuf_setlen(&sub, sub.len - 1);
+
+			/* The path is the sparse directory itself. */
+			if (!sub.len) {
+				strbuf_release(&sub);
+				return DT_DIR;
+			}
+
+			found = !get_tree_entry(istate->repo, &sd->oid, sub.buf,
+						&oid, &mode);
+			strbuf_release(&sub);
+
+			if (!found)
+				return DT_UNKNOWN;
+			if (S_ISDIR(mode) || S_ISGITLINK(mode))
+				return DT_DIR;
+			return DT_REG;
+		}
+	}
+
 	while (pos < istate->cache_nr) {
 		ce = istate->cache[pos++];
 		if (strncmp(ce->name, path, len))

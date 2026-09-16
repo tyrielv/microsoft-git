@@ -3474,10 +3474,47 @@ int index_name_is_other(struct index_state *istate, const char *name,
 	int pos;
 	if (namelen && name[namelen - 1] == '/')
 		namelen--;
-	pos = index_name_pos(istate, name, namelen);
+
+	/*
+	 * Use the non-expanding lookup. This is called for every path the
+	 * untracked walk considers, so an expanding lookup makes the first
+	 * out-of-cone path expand the whole index. That is unreachable in a
+	 * plain sparse checkout, where out-of-cone paths are absent from the
+	 * working tree, but routine when core.virtualFileSystem projects the
+	 * full tree over a sparse index.
+	 */
+	pos = index_name_pos_sparse(istate, name, namelen);
 	if (0 <= pos)
 		return 0;	/* exact match */
 	pos = -pos - 1;
+
+	/*
+	 * When a sparse-directory ancestor covers this path, the index holds
+	 * no individual entry for it. Ask that directory's tree whether the
+	 * path is tracked, instead of materializing every sparse directory.
+	 */
+	if (pos > 0) {
+		const struct cache_entry *sd = istate->cache[pos - 1];
+
+		if (S_ISSPARSEDIR(sd->ce_mode) &&
+		    ce_namelen(sd) < (unsigned int)namelen &&
+		    !strncmp(name, sd->name, ce_namelen(sd))) {
+			struct strbuf sub = STRBUF_INIT;
+			struct object_id oid;
+			unsigned short mode;
+			int found;
+
+			strbuf_add(&sub, name + ce_namelen(sd),
+				   namelen - ce_namelen(sd));
+			found = !get_tree_entry(istate->repo, &sd->oid,
+						sub.buf, &oid, &mode);
+			strbuf_release(&sub);
+
+			/* Tracked in that tree, so not an "other" path. */
+			return found ? 0 : 1;
+		}
+	}
+
 	if (pos < istate->cache_nr) {
 		struct cache_entry *ce = istate->cache[pos];
 		if (ce_namelen(ce) == namelen &&
