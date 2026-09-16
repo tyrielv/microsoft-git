@@ -2057,33 +2057,29 @@ static enum exist_status directory_exists_in_index(struct index_state *istate,
 {
 	int pos;
 
-	if (ignore_case)
-		return directory_exists_in_index_icase(istate, dirname, len);
-
 	/*
-	 * Use the non-expanding lookup. This runs for every directory the
-	 * working-tree walk reaches, so an expanding lookup turns the first
-	 * out-of-cone directory into a full index expansion -- and the walk
-	 * reaches out-of-cone directories whenever the working tree is fully
-	 * present while the index stays sparse, as core.virtualFileSystem
-	 * projects it.
+	 * Resolve a sparse-directory ancestor before anything else, including
+	 * the case-insensitive path below. The name hash used there is built
+	 * from the entries the index actually holds, so a directory that lives
+	 * inside a collapsed sparse-directory entry is absent from it and would
+	 * be reported as untracked -- which makes "git status" collapse a
+	 * directory that still contains tracked files, hiding the untracked
+	 * files inside it.
+	 *
+	 * The containing directory's tree gives the same answer an expanded
+	 * index would, because expanding a sparse directory builds its entries
+	 * from exactly that tree.
 	 */
 	pos = index_name_pos_sparse(istate, dirname, len);
 	if (pos < 0) {
 		int insert_pos = -pos - 1;
 
-		/*
-		 * Only the entry immediately before the insertion point can be
-		 * a sparse-directory ancestor of 'dirname'. When one covers
-		 * this path, resolve the remainder in that directory's tree
-		 * rather than materializing every sparse directory.
-		 */
 		if (insert_pos > 0) {
 			const struct cache_entry *sd = istate->cache[insert_pos - 1];
 
 			if (S_ISSPARSEDIR(sd->ce_mode) &&
 			    ce_namelen(sd) < (unsigned int)len &&
-			    !strncmp(dirname, sd->name, ce_namelen(sd))) {
+			    !fspathncmp(dirname, sd->name, ce_namelen(sd))) {
 				struct strbuf sub = STRBUF_INIT;
 				struct object_id oid;
 				unsigned short mode;
@@ -2099,12 +2095,21 @@ static enum exist_status directory_exists_in_index(struct index_state *istate,
 					return index_directory;
 				if (found && S_ISGITLINK(mode))
 					return index_gitdir;
+
+				/*
+				 * Absent from the tree, so an expanded index
+				 * would hold no entry under this name either.
+				 */
 				return index_nonexistent;
 			}
 		}
-
-		pos = insert_pos;
 	}
+
+	if (ignore_case)
+		return directory_exists_in_index_icase(istate, dirname, len);
+
+	if (pos < 0)
+		pos = -pos - 1;
 	while (pos < istate->cache_nr) {
 		const struct cache_entry *ce = istate->cache[pos++];
 		unsigned char endchar;
@@ -2512,42 +2517,21 @@ static int get_index_dtype(struct index_state *istate,
 
 	/*
 	 * A sparse-directory ancestor covers this path, so the index holds no
-	 * individual entry to scan for below. Resolve the remainder in that
-	 * directory's tree instead of expanding the whole index: this runs for
-	 * every path the working-tree walk cannot type from the name hash.
+	 * individual entry to scan for below. Answer DT_UNKNOWN rather than
+	 * expanding: the caller then determines the type by stat()ing the
+	 * path, which is always correct and costs one stat instead of
+	 * materializing every sparse directory. Deriving the type from the
+	 * tree would risk disagreeing with the expanded index, which reports
+	 * DT_UNKNOWN for an exact entry match and for any entry that is not
+	 * up to date.
 	 */
 	if (pos > 0) {
 		const struct cache_entry *sd = istate->cache[pos - 1];
 
 		if (S_ISSPARSEDIR(sd->ce_mode) &&
 		    ce_namelen(sd) < (unsigned int)len &&
-		    !strncmp(path, sd->name, ce_namelen(sd))) {
-			struct strbuf sub = STRBUF_INIT;
-			struct object_id oid;
-			unsigned short mode;
-			int found;
-
-			strbuf_add(&sub, path + ce_namelen(sd),
-				   len - ce_namelen(sd));
-			while (sub.len && sub.buf[sub.len - 1] == '/')
-				strbuf_setlen(&sub, sub.len - 1);
-
-			/* The path is the sparse directory itself. */
-			if (!sub.len) {
-				strbuf_release(&sub);
-				return DT_DIR;
-			}
-
-			found = !get_tree_entry(istate->repo, &sd->oid, sub.buf,
-						&oid, &mode);
-			strbuf_release(&sub);
-
-			if (!found)
-				return DT_UNKNOWN;
-			if (S_ISDIR(mode) || S_ISGITLINK(mode))
-				return DT_DIR;
-			return DT_REG;
-		}
+		    !strncmp(path, sd->name, ce_namelen(sd)))
+			return DT_UNKNOWN;
 	}
 
 	while (pos < istate->cache_nr) {

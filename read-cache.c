@@ -3510,8 +3510,18 @@ int index_name_is_other(struct index_state *istate, const char *name,
 						sub.buf, &oid, &mode);
 			strbuf_release(&sub);
 
-			/* Tracked in that tree, so not an "other" path. */
-			return found ? 0 : 1;
+			/*
+			 * Only a non-directory entry answers this question the
+			 * way an expanded index would. Expanding a sparse
+			 * directory creates entries for the blobs inside it,
+			 * never an entry named after a directory, so a tree
+			 * here means there is no index entry with this exact
+			 * name and the path is still "other". Reporting a
+			 * directory as tracked would drop the untracked files
+			 * inside it from "git status" in its default,
+			 * directory-collapsing mode.
+			 */
+			return (found && !S_ISDIR(mode)) ? 0 : 1;
 		}
 	}
 
