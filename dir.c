@@ -34,6 +34,7 @@
 #include "strbuf.h"
 #include "submodule-config.h"
 #include "symlinks.h"
+#include "tree-walk.h"
 #include "trace2.h"
 #include "tree.h"
 #include "hex.h"
@@ -1001,9 +1002,58 @@ static int read_skip_worktree_file_from_index(struct index_state *istate,
 	int pos, len;
 
 	len = strlen(path);
-	pos = index_name_pos(istate, path, len);
-	if (pos < 0)
-		return -1;
+
+	/*
+	 * Use the non-expanding lookup. This function is called for every
+	 * directory whose .gitignore could not be opened from the working
+	 * tree, so an expanding lookup here costs one full index expansion
+	 * per command -- and a second one, because write_locked_index() then
+	 * re-expands to restore the state it found.
+	 *
+	 * A plain sparse checkout never notices: an out-of-cone directory is
+	 * absent from the working tree, so the directory walk does not descend
+	 * into it and this lookup never happens. It dominates only when the
+	 * working tree is fully present while the index stays sparse, which is
+	 * what core.virtualFileSystem projects.
+	 */
+	pos = index_name_pos_sparse(istate, path, len);
+
+	if (pos < 0) {
+		struct cache_entry *ce;
+		struct object_id oid;
+		unsigned short mode;
+		int insert_pos = -pos - 1;
+
+		if (insert_pos <= 0)
+			return -1;
+
+		/*
+		 * Only the entry immediately before the insertion point can be
+		 * a sparse-directory ancestor of 'path'.
+		 */
+		ce = istate->cache[insert_pos - 1];
+		if (!S_ISSPARSEDIR(ce->ce_mode) ||
+		    ce_namelen(ce) >= len ||
+		    strncmp(path, ce->name, ce_namelen(ce)))
+			return -1;
+
+		/*
+		 * Read the blob out of that directory's tree. This walks a few
+		 * tree objects along the path instead of materializing every
+		 * sparse directory in the index. Everything inside a sparse
+		 * directory is outside the cone and therefore skip-worktree by
+		 * definition, so the ce_skip_worktree() check below has no
+		 * counterpart here.
+		 */
+		if (get_tree_entry(istate->repo, &ce->oid,
+				   path + ce_namelen(ce), &oid, &mode))
+			return -1;
+		if (!S_ISREG(mode))
+			return -1;
+
+		return do_read_blob(&oid, oid_stat, size_out, data_out);
+	}
+
 	if (!ce_skip_worktree(istate->cache[pos]))
 		return -1;
 
@@ -1534,12 +1584,23 @@ enum pattern_match_result path_matches_pattern_list(
 	int result = NOT_MATCHED;
 	size_t slash_pos;
 
-	if (core_virtualfilesystem) {
+	if (core_virtualfilesystem &&
+	    !(pl && pl->use_cone_patterns && is_sparse_index_allowed(istate, 0))) {
 		/*
 		* The virtual file system data is used to prevent git from traversing
 		* any part of the tree that is not in the virtual file system.  Return
 		* 1 to exclude the entry if it is not found in the virtual file system,
 		* else fall through to the regular excludes logic as it may further exclude.
+		*
+		* This virtual-filesystem gate is skipped only for the cone-mode
+		* sparse-checkout pattern list when the sparse index feature is
+		* active (cone-mode sparse-checkout with index.sparse). Cone
+		* membership must then be evaluated purely from the cone patterns so
+		* that out-of-cone directories can collapse into sparse-directory
+		* entries. The virtual filesystem and the cone are composed: the
+		* virtual filesystem limits traversal, the cone limits the index. All
+		* other pattern lists, and repositories without the feature, keep the
+		* original virtual-filesystem behavior.
 		*/
 		if (*dtype == DT_UNKNOWN)
 			*dtype = resolve_dtype(DT_UNKNOWN, istate, pathname, pathlen);
@@ -1641,8 +1702,14 @@ static int path_in_sparse_checkout_1(const char *path,
 	/*
 	 * When using a virtual filesystem, there aren't really patterns
 	 * to follow, but be extra careful to skip this check.
+	 *
+	 * The exception is when the sparse index feature is active (cone-mode
+	 * sparse-checkout with index.sparse). A virtual-filesystem repository
+	 * then still needs real cone-membership answers so that out-of-cone
+	 * directories can collapse into sparse-directory entries. Fall through
+	 * to the cone evaluation below in that case.
 	 */
-	if (core_virtualfilesystem)
+	if (core_virtualfilesystem && !is_sparse_index_allowed(istate, 0))
 		return 1;
 
 	/*
@@ -1990,12 +2057,59 @@ static enum exist_status directory_exists_in_index(struct index_state *istate,
 {
 	int pos;
 
+	/*
+	 * Resolve a sparse-directory ancestor before anything else, including
+	 * the case-insensitive path below. The name hash used there is built
+	 * from the entries the index actually holds, so a directory that lives
+	 * inside a collapsed sparse-directory entry is absent from it and would
+	 * be reported as untracked -- which makes "git status" collapse a
+	 * directory that still contains tracked files, hiding the untracked
+	 * files inside it.
+	 *
+	 * The containing directory's tree gives the same answer an expanded
+	 * index would, because expanding a sparse directory builds its entries
+	 * from exactly that tree.
+	 */
+	pos = index_name_pos_sparse(istate, dirname, len);
+	if (pos < 0) {
+		int insert_pos = -pos - 1;
+
+		if (insert_pos > 0) {
+			const struct cache_entry *sd = istate->cache[insert_pos - 1];
+
+			if (S_ISSPARSEDIR(sd->ce_mode) &&
+			    ce_namelen(sd) < (unsigned int)len &&
+			    !fspathncmp(dirname, sd->name, ce_namelen(sd))) {
+				struct strbuf sub = STRBUF_INIT;
+				struct object_id oid;
+				unsigned short mode;
+				int found;
+
+				strbuf_add(&sub, dirname + ce_namelen(sd),
+					   len - ce_namelen(sd));
+				found = !get_tree_entry(istate->repo, &sd->oid,
+							sub.buf, &oid, &mode);
+				strbuf_release(&sub);
+
+				if (found && S_ISDIR(mode))
+					return index_directory;
+				if (found && S_ISGITLINK(mode))
+					return index_gitdir;
+
+				/*
+				 * Absent from the tree, so an expanded index
+				 * would hold no entry under this name either.
+				 */
+				return index_nonexistent;
+			}
+		}
+	}
+
 	if (ignore_case)
 		return directory_exists_in_index_icase(istate, dirname, len);
 
-	pos = index_name_pos(istate, dirname, len);
 	if (pos < 0)
-		pos = -pos-1;
+		pos = -pos - 1;
 	while (pos < istate->cache_nr) {
 		const struct cache_entry *ce = istate->cache[pos++];
 		unsigned char endchar;
@@ -2396,10 +2510,30 @@ static int get_index_dtype(struct index_state *istate,
 	}
 
 	/* Try to look it up as a directory */
-	pos = index_name_pos(istate, path, len);
+	pos = index_name_pos_sparse(istate, path, len);
 	if (pos >= 0)
 		return DT_UNKNOWN;
 	pos = -pos-1;
+
+	/*
+	 * A sparse-directory ancestor covers this path, so the index holds no
+	 * individual entry to scan for below. Answer DT_UNKNOWN rather than
+	 * expanding: the caller then determines the type by stat()ing the
+	 * path, which is always correct and costs one stat instead of
+	 * materializing every sparse directory. Deriving the type from the
+	 * tree would risk disagreeing with the expanded index, which reports
+	 * DT_UNKNOWN for an exact entry match and for any entry that is not
+	 * up to date.
+	 */
+	if (pos > 0) {
+		const struct cache_entry *sd = istate->cache[pos - 1];
+
+		if (S_ISSPARSEDIR(sd->ce_mode) &&
+		    ce_namelen(sd) < (unsigned int)len &&
+		    !strncmp(path, sd->name, ce_namelen(sd)))
+			return DT_UNKNOWN;
+	}
+
 	while (pos < istate->cache_nr) {
 		ce = istate->cache[pos++];
 		if (strncmp(ce->name, path, len))
@@ -4169,7 +4303,7 @@ static void connect_wt_gitdir_in_nested(const char *sub_worktree,
 		die(_("index file corrupt in repo %s"), subrepo.gitdir);
 
 	/* TODO: audit for interaction with sparse-index. */
-	ensure_full_index(subrepo.index);
+	ensure_full_index_unaudited(subrepo.index);
 	for (i = 0; i < subrepo.index->cache_nr; i++) {
 		const struct cache_entry *ce = subrepo.index->cache[i];
 
