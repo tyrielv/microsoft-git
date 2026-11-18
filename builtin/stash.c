@@ -1711,7 +1711,8 @@ static int do_push_stash(const struct pathspec *ps, const char *stash_msg, int q
 		char *ps_matched = xcalloc(ps->nr, 1);
 
 		if (pathspec_needs_expanded_index(the_repository->index, ps))
-			ensure_full_index(the_repository->index);
+			expand_index_for_pathspec(the_repository->index, ps,
+						  "stash pathspec");
 		for (size_t i = 0; i < the_repository->index->cache_nr; i++)
 			ce_path_match(the_repository->index, the_repository->index->cache[i], ps,
 				      ps_matched);

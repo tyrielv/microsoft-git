@@ -649,7 +649,9 @@ void remove_name_hash(struct index_state *istate, struct cache_entry *ce)
 	if (!istate->name_hash_initialized || !(ce->ce_flags & CE_HASHED))
 		return;
 	ce->ce_flags &= ~CE_HASHED;
-	hashmap_remove(&istate->name_hash, &ce->ent, ce);
+	/* hash_index_entry() does not add sparse directories to name_hash. */
+	if (!S_ISSPARSEDIR(ce->ce_mode))
+		hashmap_remove(&istate->name_hash, &ce->ent, ce);
 
 	if (repo_ignore_case(the_repository))
 		remove_dir_entry(istate, ce);

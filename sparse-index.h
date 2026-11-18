@@ -49,6 +49,51 @@ struct cache_entry *vfs_sparse_dir_containing(struct index_state *istate,
 					      int icase);
 
 /*
+ * The same as vfs_sparse_dir_containing(), but also without
+ * core.virtualFileSystem.
+ */
+struct cache_entry *sparse_dir_containing(struct index_state *istate,
+					  const char *path, int pathlen,
+					  int icase);
+
+/*
+ * Return 1 if index lookups expand only the sparse directories that
+ * contain the path, instead of the whole index. The default is on under
+ * core.virtualFileSystem. GIT_TEST_PARTIAL_EXPAND overrides it.
+ */
+int partial_expansion_enabled(void);
+
+/*
+ * Expand the sparse-directory entries that contain 'path', one directory
+ * level at a time, until no sparse-directory entry contains 'path'. The
+ * subdirectories that do not contain 'path' stay sparse-directory
+ * entries. Return the number of expanded entries, or -1 if a tree cannot
+ * be read (then the caller must expand the whole index).
+ */
+int expand_sparse_dirs_to_path(struct index_state *istate,
+			       const char *path, int pathlen, int icase);
+
+/*
+ * Expand every sparse-directory entry below the directory 'dir' (with a
+ * trailing slash), including 'dir' itself. Return the number of expanded
+ * entries, or -1 if a tree cannot be read.
+ */
+int expand_sparse_dirs_below(struct index_state *istate,
+			     const char *dir, int dirlen);
+
+/*
+ * Expand the sparse index as far as 'pathspec' needs. If partial
+ * expansion is enabled and every item of 'pathspec' is a literal path
+ * without magic, expand only the sparse directories that contain an
+ * item or that an item names. Otherwise, expand the whole index and
+ * trace 'reason'.
+ */
+struct pathspec;
+void expand_index_for_pathspec(struct index_state *istate,
+			       const struct pathspec *pathspec,
+			       const char *reason);
+
+/*
  * Find the part of 'path' below the sparse-directory entry 'sparse_dir'
  * in the tree of that entry. 'sparse_dir' must contain 'path'. If 'icase'
  * is set, compare names without case. Return 0 and set 'oid' and 'mode'

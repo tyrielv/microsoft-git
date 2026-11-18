@@ -566,6 +566,16 @@ static int index_name_stage_pos(struct index_state *istate,
 		    ce_namelen(ce) < namelen &&
 		    !strncmp(name, ce->name, ce_namelen(ce))) {
 			const char *fmt = "searching for '%s' and found parent dir '%s'";
+
+			/*
+			 * Expand only the sparse directories that contain
+			 * 'name'. The search below then finds 'name' or its
+			 * insertion position outside of any sparse directory.
+			 */
+			if (partial_expansion_enabled() &&
+			    expand_sparse_dirs_to_path(istate, name, namelen, 0) > 0)
+				return index_name_stage_pos(istate, name, namelen, stage, search_mode);
+
 			ensure_full_index_with_reason(istate, fmt,
 						      name, ce->name);
 			return index_name_stage_pos(istate, name, namelen, stage, search_mode);

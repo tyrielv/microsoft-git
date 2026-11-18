@@ -771,10 +771,19 @@ struct cache_entry *vfs_sparse_dir_containing(struct index_state *istate,
 					      const char *path, int pathlen,
 					      int icase)
 {
+	if (!core_virtualfilesystem)
+		return NULL;
+	return sparse_dir_containing(istate, path, pathlen, icase);
+}
+
+struct cache_entry *sparse_dir_containing(struct index_state *istate,
+					  const char *path, int pathlen,
+					  int icase)
+{
 	struct cache_entry *ce;
 	int pos;
 
-	if (!core_virtualfilesystem || !istate->sparse_index || pathlen <= 0)
+	if (!istate->sparse_index || pathlen <= 0)
 		return NULL;
 
 	pos = index_name_pos_sparse(istate, path, pathlen);
@@ -857,6 +866,243 @@ int sparse_dir_get_tree_entry(struct index_state *istate,
 }
 
 /*
+ * Replace the sparse-directory entry at 'pos' with the entries of its
+ * tree: a file entry for each blob or submodule, and a sparse-directory
+ * entry for each subtree. Each new entry has CE_SKIP_WORKTREE, as in
+ * expand_index(). Return the number of new entries, or -1 if the tree
+ * cannot be read.
+ */
+static int expand_sparse_dir_at(struct index_state *istate, int pos)
+{
+	struct cache_entry *sparse_dir = istate->cache[pos];
+	struct cache_entry **entries = NULL;
+	size_t nr = 0, alloc = 0;
+	struct strbuf name = STRBUF_INIT;
+	struct tree_desc desc;
+	struct name_entry entry;
+	enum object_type type;
+	size_t size;
+	void *buf;
+
+	buf = odb_read_object(istate->repo->objects, &sparse_dir->oid,
+			      &type, &size);
+	if (!buf || type != OBJ_TREE) {
+		free(buf);
+		return -1;
+	}
+
+	trace2_region_enter("index", "expand_sparse_dir", istate->repo);
+	trace2_data_string("index", istate->repo, "expand_sparse_dir/path",
+			   sparse_dir->name);
+
+	init_tree_desc(&desc, &sparse_dir->oid, buf, size);
+	while (tree_entry(&desc, &entry)) {
+		struct cache_entry *ce;
+		unsigned int mode = entry.mode;
+
+		strbuf_reset(&name);
+		strbuf_add(&name, sparse_dir->name, ce_namelen(sparse_dir));
+		strbuf_add(&name, entry.path, tree_entry_len(&entry));
+		if (S_ISDIR(mode)) {
+			strbuf_addch(&name, '/');
+			mode = S_IFDIR;
+		}
+		ce = make_cache_entry(istate, mode, &entry.oid, name.buf, 0, 0);
+		ce->ce_flags |= CE_SKIP_WORKTREE | CE_EXTENDED;
+		ALLOC_GROW(entries, nr + 1, alloc);
+		entries[nr++] = ce;
+	}
+	free(buf);
+	strbuf_release(&name);
+
+	/*
+	 * The tree of the directory does not change, but the number of
+	 * index entries below it does. Invalidate the cache-tree entries
+	 * of the directory and its parents.
+	 */
+	cache_tree_invalidate_path(istate, sparse_dir->name);
+	remove_name_hash(istate, sparse_dir);
+
+	ALLOC_GROW(istate->cache, istate->cache_nr + nr, istate->cache_alloc);
+	MOVE_ARRAY(istate->cache + pos + nr, istate->cache + pos + 1,
+		   istate->cache_nr - pos - 1);
+	COPY_ARRAY(istate->cache + pos, entries, nr);
+	istate->cache_nr = istate->cache_nr + nr - 1;
+	for (size_t i = 0; i < nr; i++)
+		add_name_hash(istate, entries[i]);
+	free(entries);
+	discard_cache_entry(sparse_dir);
+
+	/* The positions of the entries changed. */
+	istate->fsmonitor_has_run_once = 0;
+	ewah_free(istate->fsmonitor_dirty);
+	istate->fsmonitor_dirty = NULL;
+	FREE_AND_NULL(istate->fsmonitor_last_update);
+
+	istate->sparse_index = INDEX_PARTIALLY_SPARSE;
+	trace2_data_intmax("index", istate->repo, "expand_sparse_dir/entries", nr);
+	trace2_region_leave("index", "expand_sparse_dir", istate->repo);
+	return nr;
+}
+
+int partial_expansion_enabled(void)
+{
+	static int enabled = -1;
+
+	if (enabled < 0)
+		enabled = git_env_bool("GIT_TEST_PARTIAL_EXPAND",
+				       !!core_virtualfilesystem);
+	return enabled;
+}
+
+int expand_sparse_dirs_to_path(struct index_state *istate,
+			       const char *path, int pathlen, int icase)
+{
+	int levels = 0;
+
+	for (;;) {
+		struct cache_entry *ce;
+		int pos;
+
+		ce = sparse_dir_containing(istate, path, pathlen, icase);
+		if (!ce)
+			return levels;
+		pos = index_name_pos_sparse(istate, ce->name, ce_namelen(ce));
+		if (pos < 0)
+			BUG("sparse-directory entry '%s' not found", ce->name);
+		if (expand_sparse_dir_at(istate, pos) < 0)
+			return -1;
+		levels++;
+	}
+}
+
+int expand_sparse_dirs_below(struct index_state *istate,
+			     const char *dir, int dirlen)
+{
+	struct index_state *tmp;
+	struct modify_index_context ctx;
+	struct strbuf base = STRBUF_INIT;
+	int first, expanded = 0;
+
+	if (!istate->sparse_index)
+		return 0;
+
+	first = index_name_pos_sparse(istate, dir, dirlen);
+	if (first < 0)
+		first = -first - 1;
+
+	/* Is there any sparse directory below 'dir'? */
+	for (int i = first; i < istate->cache_nr; i++) {
+		struct cache_entry *ce = istate->cache[i];
+		if (ce_namelen(ce) < dirlen || strncmp(ce->name, dir, dirlen))
+			break;
+		if (S_ISSPARSEDIR(ce->ce_mode)) {
+			expanded = 1;
+			break;
+		}
+	}
+	if (!expanded)
+		return 0;
+	expanded = 0;
+
+	trace2_region_enter("index", "expand_sparse_dir", istate->repo);
+	trace2_data_string("index", istate->repo, "expand_sparse_dir/below", dir);
+
+	/*
+	 * Build the new cache array in one pass, as expand_index() does,
+	 * so that the cost is linear in the size of the result.
+	 */
+	tmp = xcalloc(1, sizeof(*tmp));
+	tmp->repo = istate->repo;
+	tmp->ce_mem_pool = istate->ce_mem_pool;
+	tmp->cache_alloc = istate->cache_alloc;
+	ALLOC_ARRAY(tmp->cache, tmp->cache_alloc);
+	ctx.write = tmp;
+	ctx.pl = NULL;
+
+	for (int i = 0; i < istate->cache_nr; i++) {
+		struct cache_entry *ce = istate->cache[i];
+		struct tree *tree;
+		struct pathspec ps;
+
+		if (!S_ISSPARSEDIR(ce->ce_mode) || i < first ||
+		    ce_namelen(ce) < dirlen || strncmp(ce->name, dir, dirlen)) {
+			ALLOC_GROW(tmp->cache, tmp->cache_nr + 1, tmp->cache_alloc);
+			tmp->cache[tmp->cache_nr++] = ce;
+			continue;
+		}
+
+		tree = lookup_tree(istate->repo, &ce->oid);
+		memset(&ps, 0, sizeof(ps));
+		ps.recursive = 1;
+		ps.has_wildcard = 1;
+		ps.max_depth = -1;
+		strbuf_setlen(&base, 0);
+		strbuf_add(&base, ce->name, ce_namelen(ce));
+		read_tree_at(istate->repo, tree, &base, 0, &ps,
+			     add_path_to_index, &ctx);
+		cache_tree_invalidate_path(istate, ce->name);
+		discard_cache_entry(ce);
+		expanded++;
+	}
+	strbuf_release(&base);
+	istate->ce_mem_pool = tmp->ce_mem_pool;
+
+	/* The reused entries must enter the next name-hash again. */
+	free_name_hash(istate);
+	for (int i = 0; i < tmp->cache_nr; i++)
+		tmp->cache[i]->ce_flags &= ~CE_HASHED;
+
+	free(istate->cache);
+	istate->cache = tmp->cache;
+	istate->cache_nr = tmp->cache_nr;
+	istate->cache_alloc = tmp->cache_alloc;
+	free(tmp);
+
+	istate->fsmonitor_has_run_once = 0;
+	ewah_free(istate->fsmonitor_dirty);
+	istate->fsmonitor_dirty = NULL;
+	FREE_AND_NULL(istate->fsmonitor_last_update);
+	istate->sparse_index = INDEX_PARTIALLY_SPARSE;
+	trace2_region_leave("index", "expand_sparse_dir", istate->repo);
+	return expanded;
+}
+
+void expand_index_for_pathspec(struct index_state *istate,
+			       const struct pathspec *pathspec,
+			       const char *reason)
+{
+	struct strbuf dir = STRBUF_INIT;
+
+	if (!partial_expansion_enabled() || pathspec->magic)
+		goto full;
+	for (int i = 0; i < pathspec->nr; i++)
+		if (pathspec->items[i].nowildcard_len < pathspec->items[i].len ||
+		    !pathspec->items[i].len)
+			goto full;
+
+	for (int i = 0; i < pathspec->nr; i++) {
+		const struct pathspec_item *item = &pathspec->items[i];
+
+		if (expand_sparse_dirs_to_path(istate, item->match, item->len, 0) < 0)
+			goto full;
+		/* A literal pathspec can name a directory: expand all of it. */
+		strbuf_reset(&dir);
+		strbuf_add(&dir, item->match, item->len);
+		if (dir.buf[dir.len - 1] != '/')
+			strbuf_addch(&dir, '/');
+		if (expand_sparse_dirs_below(istate, dir.buf, dir.len) < 0)
+			goto full;
+	}
+	strbuf_release(&dir);
+	return;
+
+full:
+	strbuf_release(&dir);
+	ensure_full_index_with_reason(istate, "%s", reason);
+}
+
+/*
  * This static global helps avoid infinite recursion between
  * expand_to_path() and index_file_exists().
  */
@@ -915,6 +1161,11 @@ void expand_to_path(struct index_state *istate,
 			 * sparse-directory.  Expand accordingly.
 			 */
 			const char *fmt = "found index entry for '%s'";
+
+			if (partial_expansion_enabled() &&
+			    expand_sparse_dirs_to_path(istate, path, pathlen,
+						       icase) > 0)
+				break;
 			ensure_full_index_with_reason(istate, fmt,
 						      path_mutable.buf);
 			break;
