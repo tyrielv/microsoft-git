@@ -55,6 +55,29 @@ static int needs_worktree_rename(enum update_mode mode, enum update_mode dst_mod
 	       !(dst_mode & (SKIP_WORKTREE_DIR | SPARSE));
 }
 
+/*
+ * Under a virtual file system, the virtual file system decides which
+ * paths are in the working tree. The cone patterns only decide which
+ * directories the sparse index collapses. Treat every path as inside
+ * the sparse-checkout, so that "git mv" renames the file in the working
+ * tree and in the index, as it does without a sparse index.
+ */
+static int mv_path_in_sparse_checkout(const char *path,
+				      struct index_state *istate)
+{
+	if (core_virtualfilesystem)
+		return 1;
+	return path_in_sparse_checkout(path, istate);
+}
+
+static int mv_path_in_cone_mode_sparse_checkout(const char *path,
+						struct index_state *istate)
+{
+	if (core_virtualfilesystem)
+		return 1;
+	return path_in_cone_mode_sparse_checkout(path, istate);
+}
+
 #define DUP_BASENAME 1
 #define KEEP_TRAILING_SLASH 2
 
@@ -278,7 +301,7 @@ int cmd_mv(int argc,
 		internal_prefix_pathspec(&destinations, dest_paths.v[0], argv, argc, DUP_BASENAME);
 	else if (!lstat(dest_paths.v[0], &st) && S_ISDIR(st.st_mode)) {
 		internal_prefix_pathspec(&destinations, dst_w_slash, argv, argc, DUP_BASENAME);
-	} else if (!path_in_sparse_checkout(dst_w_slash, the_repository->index) &&
+	} else if (!mv_path_in_sparse_checkout(dst_w_slash, the_repository->index) &&
 		   empty_dir_has_sparse_contents(dst_w_slash)) {
 		internal_prefix_pathspec(&destinations, dst_w_slash, argv, argc, DUP_BASENAME);
 		dst_mode = SKIP_WORKTREE_DIR;
@@ -295,7 +318,7 @@ int cmd_mv(int argc,
 		 * is deprecated at this point) sparse-checkout. As
 		 * SPARSE here is only considering cone-mode situation.
 		 */
-		if (!path_in_cone_mode_sparse_checkout(destinations.v[0], the_repository->index))
+		if (!mv_path_in_cone_mode_sparse_checkout(destinations.v[0], the_repository->index))
 			dst_mode = SPARSE;
 	}
 
@@ -317,7 +340,7 @@ int cmd_mv(int argc,
 			pos = index_name_pos(the_repository->index, src, length);
 			if (pos < 0) {
 				char *src_w_slash = add_slash(src);
-				if (!path_in_sparse_checkout(src_w_slash, the_repository->index) &&
+				if (!mv_path_in_sparse_checkout(src_w_slash, the_repository->index) &&
 				    empty_dir_has_sparse_contents(src)) {
 					free(src_w_slash);
 					modes[i] |= SKIP_WORKTREE_DIR;
@@ -505,12 +528,12 @@ dir_check:
 		 * option as a way to have a successful run.
 		 */
 		if (!ignore_sparse &&
-		    !path_in_sparse_checkout(src, the_repository->index)) {
+		    !mv_path_in_sparse_checkout(src, the_repository->index)) {
 			string_list_append(&only_match_skip_worktree, src);
 			skip_sparse = 1;
 		}
 		if (!ignore_sparse &&
-		    !path_in_sparse_checkout(dst, the_repository->index)) {
+		    !mv_path_in_sparse_checkout(dst, the_repository->index)) {
 			string_list_append(&only_match_skip_worktree, dst);
 			skip_sparse = 1;
 		}
@@ -624,7 +647,7 @@ remove_entry:
 			 * should be added in a future patch.
 			 */
 			if ((mode & SPARSE) &&
-			    path_in_sparse_checkout(dst, the_repository->index)) {
+			    mv_path_in_sparse_checkout(dst, the_repository->index)) {
 				/* from out-of-cone to in-cone */
 				int dst_pos = index_name_pos(the_repository->index, dst,
 							     strlen(dst));
@@ -636,7 +659,7 @@ remove_entry:
 					die(_("cannot checkout %s"), dst_ce->name);
 			} else if ((dst_mode & (SKIP_WORKTREE_DIR | SPARSE)) &&
 				   !(mode & SPARSE) &&
-				   !path_in_sparse_checkout(dst, the_repository->index)) {
+				   !mv_path_in_sparse_checkout(dst, the_repository->index)) {
 				/* from in-cone to out-of-cone */
 				int dst_pos = index_name_pos(the_repository->index, dst,
 							     strlen(dst));

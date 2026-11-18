@@ -86,7 +86,8 @@ static int renormalize_tracked_files(struct repository *repo,
 
 		if (!include_sparse &&
 		    (ce_skip_worktree(ce) ||
-		     !path_in_sparse_checkout(ce->name, repo->index)))
+		     (!core_virtualfilesystem &&
+		      !path_in_sparse_checkout(ce->name, repo->index))))
 			continue;
 		if (ce_stage(ce))
 			continue; /* do not touch unmerged paths */
@@ -371,7 +372,7 @@ static int add_files(struct repository *repo, struct dir_struct *dir, int flags)
 	}
 
 	for (i = 0; i < dir->nr; i++) {
-		if (!include_sparse &&
+		if (!include_sparse && !core_virtualfilesystem &&
 		    !path_in_sparse_checkout(dir->entries[i]->name, repo->index)) {
 			string_list_append(&matched_sparse_paths,
 					   dir->entries[i]->name);
