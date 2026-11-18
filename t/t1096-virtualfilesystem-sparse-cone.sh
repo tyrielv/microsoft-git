@@ -141,7 +141,7 @@ test_expect_success 'widening the cone keeps reported files' '
 	test_cmp expect actual
 '
 
-test_expect_success 'reapply on a collapsed index does not expand it' '
+test_expect_success 'reapply expands only the directory of a reported path' '
 	test_when_finished "cp vfs/.git/vfs-paths.bak vfs/.git/vfs-paths" &&
 	cp vfs/.git/vfs-paths vfs/.git/vfs-paths.bak &&
 	echo out/f1 >>vfs/.git/vfs-paths &&
@@ -154,7 +154,8 @@ test_expect_success 'reapply on a collapsed index does not expand it' '
 	git -C vfs ls-files -t --sparse >actual &&
 	cat >expect <<-\EOF &&
 	H in/a
-	S out/
+	H out/f1
+	S out/f2
 	H r
 	EOF
 	test_cmp expect actual

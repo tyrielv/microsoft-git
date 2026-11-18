@@ -47,7 +47,7 @@ test_expect_success 'setup' '
 	)
 '
 
-test_expect_success 'paths inside sparse directories do not expand the index' '
+test_expect_success 'tracked paths inside sparse directories expand only their directories' '
 	cat >repo/.git/vfs-paths <<-\EOF &&
 	r
 	in/a
@@ -62,13 +62,16 @@ test_expect_success 'paths inside sparse directories do not expand the index' '
 		git -C repo -c core.ignorecase=false \
 		ls-files -t --sparse >actual &&
 	test_no_index_expansion trace.txt &&
-	test_trace2_data vfs apply/nr_unknown 3 <trace.txt &&
+	test_region index expand_sparse_dir trace.txt &&
+	test_trace2_data vfs apply/nr_unknown 0 <trace.txt &&
 
 	cat >expect <<-\EOF &&
 	H in/a
 	H in/deeper/a
-	S in/other/
-	S out/
+	H in/other/a
+	H out/f1
+	S out/f2
+	H out/sub/f
 	H r
 	EOF
 	test_cmp expect actual
@@ -109,7 +112,9 @@ test_expect_success 'case-insensitive lookups still match in-cone paths' '
 	H in/a
 	S in/deeper/a
 	S in/other/
-	S out/
+	H out/f1
+	S out/f2
+	S out/sub/
 	S r
 	EOF
 	test_cmp expect actual
@@ -123,16 +128,32 @@ test_expect_success 'status reports in-cone changes without expanding' '
 	in/deeper/a
 	out/f1
 	EOF
+	mkdir -p repo/out &&
+	echo out/f1 >repo/out/f1 &&
 	echo changed >>repo/in/a &&
 	rm -f trace.txt &&
 	GIT_TRACE2_EVENT="$(pwd)/trace.txt" \
 		git -C repo status --porcelain --untracked-files=no >actual &&
 	test_no_index_expansion trace.txt &&
 	echo " M in/a" >expect &&
-	test_cmp expect actual &&
+	test_cmp expect actual
+'
 
-	git -C repo ls-files --sparse >files &&
-	test_grep "^out/$" files
+test_expect_success 'status reports a change in a sparse directory' '
+	test_when_finished "git -C repo checkout -- out/f2" &&
+	cat >repo/.git/vfs-paths <<-\EOF &&
+	out/f2
+	EOF
+	echo out/f2 >repo/out/f2 &&
+	echo changed >>repo/out/f2 &&
+	git -C repo status --porcelain --untracked-files=no >actual &&
+	echo " M out/f2" >expect &&
+	test_cmp expect actual &&
+	git -C repo add out/f2 &&
+	git -C repo diff --cached --name-only >actual &&
+	echo out/f2 >expect &&
+	test_cmp expect actual &&
+	git -C repo reset -q -- out/f2
 '
 
 test_expect_success 'full index keeps the original behavior' '

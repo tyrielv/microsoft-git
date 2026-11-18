@@ -284,10 +284,12 @@ struct apply_virtual_filesystem_stats {
 	int nr_vfs_rows;
 	int nr_bulk_skip;
 	int nr_explicit_skip;
+	int nr_expanded;
 };
 
 static void clear_ce_flags_virtualfilesystem_1(struct index_state *istate, int select_mask, int clear_mask,
-					       struct apply_virtual_filesystem_stats *stats)
+					       struct apply_virtual_filesystem_stats *stats,
+					       int expand)
 {
 	char *buf, *entry;
 	size_t i;
@@ -304,6 +306,13 @@ static void clear_ce_flags_virtualfilesystem_1(struct index_state *istate, int s
 	 * CE_SKIP_WORKTREE bit. With a full index, the two functions are
 	 * the same. The name-hash does not contain sparse-directory
 	 * entries, so the core.ignoreCase lookups do not expand the index.
+	 *
+	 * If 'expand' is set, a reported path inside a sparse-directory
+	 * entry is different: the virtual file system reports it, so Git
+	 * must look at it in the working tree. For example, the user
+	 * changed a file in a collapsed directory, and the virtual file
+	 * system could not add the directory to the cone. Expand only the
+	 * sparse directories that contain the path, then clear the bit.
 	 */
 
 	/* clear specified flag bits for everything in the virtual file system */
@@ -316,6 +325,28 @@ static void clear_ce_flags_virtualfilesystem_1(struct index_state *istate, int s
 			stats->nr_vfs_rows++;
 
 			len = buf + i - entry;
+
+			if (expand && istate->sparse_index && buf[i - 1] != '/') {
+				int icase = repo_ignore_case(the_repository);
+				struct cache_entry *sd;
+				struct object_id oid;
+				unsigned short mode;
+
+				/*
+				 * Expand only for a tracked path. The walk
+				 * finds an untracked path without an expansion.
+				 */
+				sd = sparse_dir_containing(istate, entry, len, icase);
+				if (sd && !sparse_dir_get_tree_entry(istate, sd, entry, len,
+								     icase, &oid, &mode) &&
+				    !S_ISDIR(mode)) {
+					int n = expand_sparse_dirs_to_path(istate, entry, len, icase);
+					if (n < 0)
+						die(_("unable to expand the sparse directory of '%.*s'"),
+						    (int)len, entry);
+					stats->nr_expanded += n;
+				}
+			}
 
 			/* look for a directory wild card (ie "dir1/") */
 			if (buf[i - 1] == '/') {
@@ -393,7 +424,7 @@ int clear_ce_flags_virtualfilesystem(struct index_state *istate, int select_mask
 {
 	struct apply_virtual_filesystem_stats stats = {0};
 
-	clear_ce_flags_virtualfilesystem_1(istate, select_mask, clear_mask, &stats);
+	clear_ce_flags_virtualfilesystem_1(istate, select_mask, clear_mask, &stats, 0);
 	return istate->cache_nr;
 }
 
@@ -422,7 +453,10 @@ void apply_virtualfilesystem(struct index_state *istate)
 	for (i = 0; i < istate->cache_nr; i++)
 		istate->cache[i]->ce_flags |= CE_SKIP_WORKTREE;
 
-	clear_ce_flags_virtualfilesystem_1(istate, 0, CE_SKIP_WORKTREE, &stats);
+	clear_ce_flags_virtualfilesystem_1(istate, 0, CE_SKIP_WORKTREE, &stats,
+					   git_env_bool("GIT_VFS_EXPAND_REPORTED", 1));
+	if (stats.nr_expanded)
+		trace2_data_intmax("vfs", the_repository, "apply/nr_expanded", stats.nr_expanded);
 	if (stats.nr_vfs_rows > 0) {
 		trace2_data_intmax("vfs", the_repository, "apply/tracked", stats.nr_bulk_skip + stats.nr_explicit_skip);
 
